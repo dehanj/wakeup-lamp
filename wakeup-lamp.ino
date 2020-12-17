@@ -17,19 +17,16 @@
 /* MQTT */
 #include <PubSubClient.h>
 
-/* For web sever */
-#include <Arduino.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-
-/* SPIFFS */
-#include <SPIFFS.h>
-
 /* MQTT */
-#define mqtt_server "YOUR_MQTT_SERVER_HOST"
-#define mqtt_user "your_username"
-#define mqtt_password "your_password"
-#define wakeup_topic "bedroom/wakeup"
+#define mqtt_server "IP_ADDRESS"
+#define mqtt_user "username"
+#define mqtt_password "pw"
+#define wakeup_enable_topic "bedroom/wakeup/enable"
+#define wakeup_time_topic "bedroom/wakeup/time"
+#define wakeup_dur_topic "bedroom/wakeup/wake_dur"
+#define wakeup_lit_dur_topic "bedroom/wakeup/lit_dur"
+#define wakeup_light_topic "bedroom/wakeup/light"
+#define wakeup_weekend_topic "bedroom/wakeup/weekend"
 
 /* Wifi */
 const char *ssid = "YOUR_SSID";
@@ -58,17 +55,14 @@ CRGB leds[NUM_LEDS];
     5 = FRIDAY
     6 = SATURDAY
 */
-const char* WEEKDAYS[] = { "/Sunday.txt", "/Monday.txt", "/Tuesday.txt", "/Wednesday.txt", "/Thursday.txt", "/Friday.txt", "/Saturday.txt"};
-
 
 typedef struct {
-  uint8_t hour[7];
-  uint8_t minute[7];
-  uint8_t duration_light_transition[7];
-  uint8_t duration_lit[7];
-  bool reoccuring[7];
-  bool set[7];
-  uint8_t id[7];
+  uint8_t hour;
+  uint8_t minute;
+  uint8_t duration_light_transition;
+  uint8_t duration_lit;
+  bool enable;
+  bool weekends;
 } wakeup_alarm_t;
 
 /* TASKS */
@@ -83,67 +77,8 @@ void task_wakeup_alarm(
 WiFiClient espClient;
 PubSubClient client(espClient);
 static struct tm timeinfo;
-AsyncWebServer server(80);
 static wakeup_alarm_t wakeup_alarms;
 
-
-/* Website index */
-
-const char index_html[] PROGMEM =
-  R"rawliteral(
-<!DOCTYPE HTML><html><head>
-  <title>ESP Wakeup Input Form</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script>
-    function submitMessage() {
-      alert("Saved value!");
-      setTimeout(function(){ document.location.reload(false); }, 500);
-    }
-  </script></head><body>
-    <form action="/get" target="hidden-form">
-    Write on format: Hour[0-12] : Minute[0-60] : light_duration[1-60] : duration_lit[1-60] : Reoccurring[0-1] : set[0-1]
-  </form><br>
-  <form action="/get" target="hidden-form">
-    Monday (current value %Monday%):
-    <input type="text" name="mHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form><br>
-  <form action="/get" target="hidden-form">
-    Tuesday (current value %Tuesday%):
-    <input type="text" name="tuHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form><br>
-  <form action="/get" target="hidden-form">
-    Wednesday (current value %Wednesday%):
-    <input type="text" name="wHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form>
-    <form action="/get" target="hidden-form">
-    Thursday (current value %Thursday%):
-    <input type="text" name="thHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form>
-    <form action="/get" target="hidden-form">
-    Friday (current value %Friday%):
-    <input type="text" name="fHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form>
-    <form action="/get" target="hidden-form">
-    Saturday (current value %Saturday%):
-    <input type="text" name="saHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form>
-    <form action="/get" target="hidden-form">
-    Sunday (current value %Sunday%):
-    <input type="texter" name="suHour">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form>
-    <form action="/get" target="hidden-form">
-    Clear all:
-    <input type="submit" value="Clear" onclick="submitMessage()">
-  </form>
-  <iframe style="display:none" name="hidden-form"></iframe>
-</body></html>)rawliteral";
 
 /* Program */
 
@@ -158,17 +93,14 @@ void setup()
   ledcSetup(0, 5000, 8);
   ledcAttachPin(WARM_WHITE_LED_PIN, 0);
 
-  if (!SPIFFS.begin(true)) {
-    Serial.println("An Error has occurred while mounting SPIFFS");
-    return;
-  }
-
-  memset(&wakeup_alarms, 0x00, sizeof(wakeup_alarm_t));
+  memset(&wakeup_alarms, 0, sizeof(wakeup_alarm_t));
+  wakeup_alarms.duration_light_transition = 15;
+  wakeup_alarms.duration_lit = 15;
 
   xTaskCreatePinnedToCore(
     task_network_loop,
     "task_network_loop", // A name just for humans
-    10000, // This stack size can be checked & adjusted by reading the Stack Highwater
+    3072, // This stack size can be checked & adjusted by reading the Stack Highwater
     NULL,
     2, // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
     NULL,
@@ -177,7 +109,7 @@ void setup()
   xTaskCreatePinnedToCore(
     task_wakeup_alarm,
     "task_wakeup_alarm",
-    10000, // Stack size
+    1024, // Stack size
     NULL,
     2, // Priority
     NULL,
@@ -207,6 +139,55 @@ void mqtt_callback(
   }
   Serial.println();
 
+
+  if (strcmp(topic, wakeup_enable_topic) == 0) {
+    payload[length] = '\0';
+    String s = String((char*)payload);
+    if (s.compareTo("on") == 0 ) {
+      wakeup_alarms.enable = 1;
+    } else {
+      wakeup_alarms.enable = 0;
+    }
+
+  } else if (strcmp(topic, wakeup_time_topic) == 0) {
+    char tmp1[20];
+
+    strncpy(tmp1, (char*)payload, length);
+    wakeup_alarms.hour = atoi(strtok(tmp1, ":"));
+    wakeup_alarms.minute = atoi(strtok(NULL, ":"));
+
+  } else if (strcmp(topic, wakeup_dur_topic) == 0) {
+    payload[length] = '\0';
+    String s = String((char*)payload);
+    wakeup_alarms.duration_light_transition = s.toInt();
+
+  } else if (strcmp(topic, wakeup_lit_dur_topic) == 0) {
+    payload[length] = '\0';
+    String s = String((char*)payload);
+    wakeup_alarms.duration_lit = s.toInt();
+
+  } else if (strcmp(topic, wakeup_light_topic) == 0) {
+    payload[length] = '\0';
+    String s = String((char*)payload);
+
+    if (s.compareTo("on") == 0 ) {
+      light_on();
+    } else {
+      light_off();
+    }
+
+  } else if (strcmp(topic, wakeup_weekend_topic) == 0) {
+    payload[length] = '\0';
+    String s = String((char*)payload);
+
+    if (s.compareTo("on") == 0 ) {
+      wakeup_alarms.weekends = 1;
+    } else {
+      wakeup_alarms.weekends = 0;
+    }
+  }
+
+
 }
 
 void init_ntp_time()
@@ -233,10 +214,9 @@ void task_network_loop(
   (void) pvParameters;
 
   for (;;) { // A Task shall never return or exit.
-    Serial.println("network loop");
+    //    Serial.println("network loop");
 
     if (WiFi.status() != WL_CONNECTED) {
-      // WiFi.disconnect();
       // Connect to Wi-Fi
       Serial.print("Connecting to ");
       Serial.println(ssid);
@@ -249,8 +229,6 @@ void task_network_loop(
       Serial.println("WiFi connected.");
       Serial.print("IP address: ");
       Serial.println(WiFi.localIP());
-
-      setup_webiste();
     }
 
     if (WiFi.status() == WL_CONNECTED && ntp_init == false) {
@@ -258,14 +236,19 @@ void task_network_loop(
       ntp_init = true;
     }
 
-    if (0 && (!client.connected()) && (WiFi.status() == WL_CONNECTED) ) {
+    if ((!client.connected()) && (WiFi.status() == WL_CONNECTED) ) {
       // Loop until we're reconnected
       while (!client.connected()) {
         Serial.print("Attempting MQTT connection...");
         // Attempt to connect
         if (client.connect("Wakeup-client", mqtt_user, mqtt_password)) {
           Serial.println("connected");
-          client.subscribe(wakeup_topic);
+          client.subscribe(wakeup_enable_topic);
+          client.subscribe(wakeup_time_topic);
+          client.subscribe(wakeup_dur_topic);
+          client.subscribe(wakeup_lit_dur_topic);
+          client.subscribe(wakeup_light_topic);
+          client.subscribe(wakeup_weekend_topic);
         } else {
           Serial.print("failed, rc=");
           Serial.print(client.state());
@@ -276,9 +259,9 @@ void task_network_loop(
       }
     }
     client.loop();
-    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
+//    Serial.println(uxTaskGetStackHighWaterMark(NULL));
 
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -288,22 +271,24 @@ void task_wakeup_alarm(
   (void) pvParameters;
 
   for (;;) { // A Task shall never return or exit.
-    Serial.println("Wakeup alarm");
-    parse_stored_alarms();
+//    Serial.println("Wakeup alarm");
 
     update_ntp_time();
     print_local_time();
 
-    if (timeinfo.tm_hour == wakeup_alarms.hour[timeinfo.tm_wday]
-        && timeinfo.tm_min == wakeup_alarms.minute[timeinfo.tm_wday]
-        && wakeup_alarms.set[timeinfo.tm_wday]) {
+    if (timeinfo.tm_hour == wakeup_alarms.hour
+        && timeinfo.tm_min == wakeup_alarms.minute
+        && wakeup_alarms.enable) {
 
-      if (wakeup_alarms.reoccuring[timeinfo.tm_wday] == false) {
-        wakeup_alarms.set[timeinfo.tm_wday] = false;
+      if (!(timeinfo.tm_wday == 0 || timeinfo.tm_wday == 6)) {
+        trigg_wakeup_sequence();
+      } else {
+        if (wakeup_alarms.weekends) {
+          trigg_wakeup_sequence();
+        }
       }
-      trigg_wakeup_sequence();
     }
-    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
+//     Serial.println(uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay( (60 * 998) / portTICK_PERIOD_MS); // Just under one minute to make sure we have a trigger
   }
 }
@@ -329,7 +314,7 @@ void task_wakeup_sequence(
   Serial.println("Sequence started");
   /* 255 * 235 = 1 minute */
   int convertToDelaySteps = 235;
-  int fadeDelay = wakeup_alarms.duration_light_transition[timeinfo.tm_wday]
+  int fadeDelay = wakeup_alarms.duration_light_transition
                   * convertToDelaySteps;
   Serial.println(fadeDelay);
 
@@ -340,9 +325,6 @@ void task_wakeup_sequence(
   // Serial.println(uxTaskGetStackHighWaterMark(NULL));
 
   for (int i = 0; i < 256; i++) {
-
-
-
 
     if (i > 200) {
       k++;
@@ -366,12 +348,11 @@ void task_wakeup_sequence(
   }
   Serial.println("Sequence done");
   vTaskDelay(
-    (wakeup_alarms.duration_lit[timeinfo.tm_wday] * 1000 * 60)
+    (wakeup_alarms.duration_lit * 1000 * 60)
     / portTICK_PERIOD_MS);
   leds_off();
-  ledcWrite(0, 0);
+  light_off();
   vTaskDelete(NULL);
-
 }
 
 void leds_off()
@@ -380,168 +361,17 @@ void leds_off()
   FastLED.show();
 }
 
-
-/* Website */
-
-void notFound(
-  AsyncWebServerRequest *request)
+void light_on()
 {
-  request->send(404, "text/plain", "Not found");
+  ledcWrite(0, 255);
 }
 
-// Replaces placeholder with stored values
-String processor(
-  const String& var)
+void light_off()
 {
-  Serial.println(var);
-  if (var == "Monday") {
-    return readFile(SPIFFS, "/Monday.txt");
-  } else if (var == "Tuesday") {
-    return readFile(SPIFFS, "/Tuesday.txt");
-  } else if (var == "Wednesday") {
-    return readFile(SPIFFS, "/Wednesday.txt");
-  } else if (var == "Thursday") {
-    return readFile(SPIFFS, "/Thursday.txt");
-  } else if (var == "Friday") {
-    return readFile(SPIFFS, "/Friday.txt");
-  } else if (var == "Saturday") {
-    return readFile(SPIFFS, "/Saturday.txt");
-  } else if (var == "Sunday") {
-    return readFile(SPIFFS, "/Sunday.txt");
-  }
-  return String();
+  ledcWrite(0, 0);
 }
 
-void setup_webiste() {
-  // Send web page with input fields to client
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/html", index_html, processor);
-  });
-  // Send a GET request to <ESP_IP>/get?inputString=<inputMessage>
-  server.on("/get", HTTP_GET, [] (AsyncWebServerRequest * request) {
-    String tmp;
-    if (request->hasParam("mHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("mHour")->value();
-
-      writeFile(SPIFFS, "/Monday.txt", tmp.c_str());
-
-
-    }
-    else if (request->hasParam("tuHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("tuHour")->value();
-
-      writeFile(SPIFFS, "/Tuesday.txt", tmp.c_str());
-
-    }
-    else if (request->hasParam("wHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("wHour")->value();
-
-      writeFile(SPIFFS, "/Wednesday.txt", tmp.c_str());
-
-    }
-    else if (request->hasParam("thHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("thHour")->value();
-
-      writeFile(SPIFFS, "/Thursday.txt", tmp.c_str());
-
-    }
-    else if (request->hasParam("fHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("fHour")->value();
-
-      writeFile(SPIFFS, "/Friday.txt", tmp.c_str());
-
-    }
-    else if (request->hasParam("saHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("saHour")->value();
-
-      writeFile(SPIFFS, "/Saturday.txt", tmp.c_str());
-
-    }
-    else if (request->hasParam("suHour")) {
-      tmp += random(255);
-      tmp += ":";
-      tmp += request->getParam("suHour")->value();
-
-
-
-      writeFile(SPIFFS, "/Sunday.txt", tmp.c_str());
-
-    } else {
-      //            inputMessage = "No message sent";
-    }
-    Serial.println("new input");
-    //    request->send(200, "text/text", "Thanks!");
-  });
-  server.onNotFound(notFound);
-  server.begin();
-}
-
-String readFile(fs::FS &fs, const char * path) {
-  Serial.printf("Reading file: %s\r\n", path);
-  File file = fs.open(path, "r");
-  if (!file || file.isDirectory()) {
-    Serial.println("- empty file or failed to open file");
-    return String();
-  }
-  Serial.println("- read from file:");
-  String fileContent;
-  while (file.available()) {
-    fileContent += String((char)file.read());
-  }
-  Serial.println(fileContent);
-  return fileContent;
-}
-
-void writeFile(fs::FS &fs, const char * path, const char * message) {
-  Serial.printf("Writing file: %s\r\n", path);
-  File file = fs.open(path, "w");
-  if (!file) {
-    Serial.println("- failed to open file for writing");
-    return;
-  }
-  if (file.print(message)) {
-    Serial.println("- file written");
-  } else {
-    Serial.println("- write failed");
-  }
-}
-
-void parse_stored_alarms() {
-  char tmp1[20];
-  char* token;
-  for (int i = 0; i < 7; i++) {
-    String tmp = readFile(SPIFFS, WEEKDAYS[i]);
-
-
-    if (tmp.length() > 0 ) {
-      strcpy(tmp1, tmp.c_str());
-      token = strtok(tmp1, ":");
-
-      if (wakeup_alarms.id[i] != atoi(token))
-      {
-        wakeup_alarms.hour[i] = atoi(strtok(NULL, ":"));
-        wakeup_alarms.minute[i] = atoi(strtok(NULL, ":"));
-        wakeup_alarms.duration_light_transition[i] = atoi(strtok(NULL, ":"));
-        wakeup_alarms.duration_lit[i] = atoi(strtok(NULL, ":"));
-        wakeup_alarms.reoccuring[i] = atoi(strtok(NULL, ":"));
-        wakeup_alarms.set[i] = atoi(strtok(NULL, ":"));
-      }
-    }
-  }
-}
-
-int check_valid_alarm_string(String input) {
-
+bool get_light_on()
+{
+  return ledcRead(0) > 0 ? true : false;
 }
