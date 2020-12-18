@@ -44,6 +44,9 @@ bool ntp_init = false;
 #define WARM_WHITE_LED_PIN 12
 CRGB leds[NUM_LEDS];
 
+/* touck button */
+#define TOUCH_BUTTON 15
+
 /* Alarm struct */
 /*
    Day is regulatated by an array of structs, location
@@ -78,9 +81,15 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 static struct tm timeinfo;
 static wakeup_alarm_t wakeup_alarms;
-
+static bool button_pressed = false;
+static bool alarm_active = false;
 
 /* Program */
+
+void IRAM_ATTR touch_isr()
+{
+  button_pressed = 1;
+}
 
 void setup()
 {
@@ -89,6 +98,8 @@ void setup()
 
   client.setServer(mqtt_server, 1883);
   client.setCallback(mqtt_callback);
+
+  attachInterrupt(TOUCH_BUTTON, touch_isr, RISING);
 
   ledcSetup(0, 5000, 8);
   ledcAttachPin(WARM_WHITE_LED_PIN, 0);
@@ -139,11 +150,10 @@ void mqtt_callback(
   }
   Serial.println();
 
-
   if (strcmp(topic, wakeup_enable_topic) == 0) {
     payload[length] = '\0';
-    String s = String((char*)payload);
-    if (s.compareTo("on") == 0 ) {
+    String s = String((char *) payload);
+    if (s.compareTo("on") == 0) {
       wakeup_alarms.enable = 1;
     } else {
       wakeup_alarms.enable = 0;
@@ -152,25 +162,25 @@ void mqtt_callback(
   } else if (strcmp(topic, wakeup_time_topic) == 0) {
     char tmp1[20];
 
-    strncpy(tmp1, (char*)payload, length);
+    strncpy(tmp1, (char *) payload, length);
     wakeup_alarms.hour = atoi(strtok(tmp1, ":"));
     wakeup_alarms.minute = atoi(strtok(NULL, ":"));
 
   } else if (strcmp(topic, wakeup_dur_topic) == 0) {
     payload[length] = '\0';
-    String s = String((char*)payload);
+    String s = String((char *) payload);
     wakeup_alarms.duration_light_transition = s.toInt();
 
   } else if (strcmp(topic, wakeup_lit_dur_topic) == 0) {
     payload[length] = '\0';
-    String s = String((char*)payload);
+    String s = String((char *) payload);
     wakeup_alarms.duration_lit = s.toInt();
 
   } else if (strcmp(topic, wakeup_light_topic) == 0) {
     payload[length] = '\0';
-    String s = String((char*)payload);
+    String s = String((char *) payload);
 
-    if (s.compareTo("on") == 0 ) {
+    if (s.compareTo("on") == 0) {
       light_on();
     } else {
       light_off();
@@ -178,15 +188,14 @@ void mqtt_callback(
 
   } else if (strcmp(topic, wakeup_weekend_topic) == 0) {
     payload[length] = '\0';
-    String s = String((char*)payload);
+    String s = String((char *) payload);
 
-    if (s.compareTo("on") == 0 ) {
+    if (s.compareTo("on") == 0) {
       wakeup_alarms.weekends = 1;
     } else {
       wakeup_alarms.weekends = 0;
     }
   }
-
 
 }
 
@@ -213,8 +222,7 @@ void task_network_loop(
 {
   (void) pvParameters;
 
-  for (;;) { // A Task shall never return or exit.
-    //    Serial.println("network loop");
+  for (;;) {
 
     if (WiFi.status() != WL_CONNECTED) {
       // Connect to Wi-Fi
@@ -253,15 +261,29 @@ void task_network_loop(
           Serial.print("failed, rc=");
           Serial.print(client.state());
           Serial.println(" try again in 5 seconds");
-          // Wait 5 seconds before retrying
           vTaskDelay(5000 / portTICK_PERIOD_MS);
         }
       }
     }
     client.loop();
-//    Serial.println(uxTaskGetStackHighWaterMark(NULL));
+    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
 
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    if (button_pressed == true) {
+      if (alarm_active == true) {
+        alarm_active = false;
+        leds_off();
+        light_off();
+      } else {
+        if (is_light_on() == true) {
+          light_off();
+        } else {
+          light_on();
+        }
+      }
+      button_pressed = false;
+    }
+
+    vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
 
@@ -270,8 +292,7 @@ void task_wakeup_alarm(
 {
   (void) pvParameters;
 
-  for (;;) { // A Task shall never return or exit.
-//    Serial.println("Wakeup alarm");
+  for (;;) {
 
     update_ntp_time();
     print_local_time();
@@ -288,7 +309,7 @@ void task_wakeup_alarm(
         }
       }
     }
-//     Serial.println(uxTaskGetStackHighWaterMark(NULL));
+    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay( (60 * 998) / portTICK_PERIOD_MS); // Just under one minute to make sure we have a trigger
   }
 }
@@ -310,6 +331,7 @@ void task_wakeup_sequence(
   void *pvParameters)
 {
   (void) pvParameters;
+  alarm_active = true;
 
   Serial.println("Sequence started");
   /* 255 * 235 = 1 minute */
@@ -325,33 +347,38 @@ void task_wakeup_sequence(
   // Serial.println(uxTaskGetStackHighWaterMark(NULL));
 
   for (int i = 0; i < 256; i++) {
+    if (wakeup_alarms.enable == 1 && alarm_active == true) {
 
-    if (i > 200) {
-      k++;
-      l = l + 3;
-    } else {
-      if (i % 3 == 0) {
-        l++;
+      if (i > 200) {
+        k++;
+        l = l + 3;
+      } else {
+        if (i % 3 == 0) {
+          l++;
+        }
       }
+
+      j++;
+
+      if (j > 255) {
+        j = 255;
+      }
+
+      fill_solid(leds, NUM_LEDS, CHSV(80, 255 - k, j));
+      ledcWrite(0, l);
+      FastLED.show();
+      vTaskDelay(fadeDelay / portTICK_PERIOD_MS);
     }
-
-    j++;
-
-    if (j > 255) {
-      j = 255;
-    }
-
-    fill_solid(leds, NUM_LEDS, CHSV(80, 255 - k, j));
-    ledcWrite(0, l);
-    FastLED.show();
-    vTaskDelay(fadeDelay / portTICK_PERIOD_MS);
   }
-  Serial.println("Sequence done");
-  vTaskDelay(
-    (wakeup_alarms.duration_lit * 1000 * 60)
-    / portTICK_PERIOD_MS);
+  if (wakeup_alarms.enable == 1 && alarm_active == true) {
+    Serial.println("Sequence done");
+    vTaskDelay(
+      (wakeup_alarms.duration_lit * 1000 * 60)
+      / portTICK_PERIOD_MS);
+  }
   leds_off();
   light_off();
+  alarm_active = false;
   vTaskDelete(NULL);
 }
 
@@ -371,7 +398,7 @@ void light_off()
   ledcWrite(0, 0);
 }
 
-bool get_light_on()
+bool is_light_on()
 {
   return ledcRead(0) > 0 ? true : false;
 }
