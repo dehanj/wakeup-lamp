@@ -26,6 +26,7 @@
 #define wakeup_dur_topic "bedroom/wakeup/wake_dur"
 #define wakeup_lit_dur_topic "bedroom/wakeup/lit_dur"
 #define wakeup_light_topic "bedroom/wakeup/light"
+#define wakeup_light_cb_topic "bedroom/wakeup/light_cb"
 #define wakeup_weekend_topic "bedroom/wakeup/weekend"
 
 /* Wifi */
@@ -81,14 +82,14 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 static struct tm timeinfo;
 static wakeup_alarm_t wakeup_alarms;
-static bool button_pressed = false;
+static volatile bool button_pressed = false;
 static bool alarm_active = false;
 
 /* Program */
 
 void IRAM_ATTR touch_isr()
 {
-  button_pressed = 1;
+  button_pressed = true;
 }
 
 void setup()
@@ -276,8 +277,10 @@ void task_network_loop(
       } else {
         if (is_light_on() == true) {
           light_off();
+          client.publish(wakeup_light_cb_topic, "off");
         } else {
           light_on();
+          client.publish(wakeup_light_cb_topic, "on");
         }
       }
       button_pressed = false;
@@ -294,23 +297,28 @@ void task_wakeup_alarm(
 
   for (;;) {
 
-    update_ntp_time();
-    print_local_time();
+    if ( wakeup_alarms.enable ) {
+      update_ntp_time();
+      print_local_time();
 
-    if (timeinfo.tm_hour == wakeup_alarms.hour
-        && timeinfo.tm_min == wakeup_alarms.minute
-        && wakeup_alarms.enable) {
+      if (timeinfo.tm_hour == wakeup_alarms.hour
+          && timeinfo.tm_min == wakeup_alarms.minute
+          && wakeup_alarms.enable) {
 
-      if (!(timeinfo.tm_wday == 0 || timeinfo.tm_wday == 6)) {
-        trigg_wakeup_sequence();
-      } else {
-        if (wakeup_alarms.weekends) {
+        if (!(timeinfo.tm_wday == 0 || timeinfo.tm_wday == 6)) {
           trigg_wakeup_sequence();
+        } else {
+          if (wakeup_alarms.weekends) {
+            trigg_wakeup_sequence();
+          }
         }
       }
+      // Serial.println(uxTaskGetStackHighWaterMark(NULL));
+      vTaskDelay( (60 * 998) / portTICK_PERIOD_MS ); // Just under one minute to make sure we have a trigger
+    } else {
+      vTaskDelay( 1000 / portTICK_PERIOD_MS );
     }
-    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
-    vTaskDelay( (60 * 998) / portTICK_PERIOD_MS); // Just under one minute to make sure we have a trigger
+
   }
 }
 
