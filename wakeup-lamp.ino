@@ -314,7 +314,10 @@ void task_wakeup_alarm(
         }
       }
       // Serial.println(uxTaskGetStackHighWaterMark(NULL));
-      vTaskDelay( (60 * 998) / portTICK_PERIOD_MS ); // Just under one minute to make sure we have a trigger
+
+      uint delay = (60 - timeinfo.tm_sec) + 5; /* Aim is xx:xx:05 */
+
+      vTaskDelay( (delay * 1000) / portTICK_PERIOD_MS );
     } else {
       vTaskDelay( 1000 / portTICK_PERIOD_MS );
     }
